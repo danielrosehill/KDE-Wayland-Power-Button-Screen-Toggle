@@ -1,0 +1,76 @@
+#!/usr/bin/python3
+"""Power button = screen on/off toggle, and nothing else wakes the screens.
+
+Grabs the ACPI "Power Button" input devices exclusively (logind, PowerDevil, KWin never see the key).
+Press -> screens off (KWin DPMS via kscreen-doctor) and EVIOCGRAB every other keyboard/mouse so input
+can't wake them. Press again -> screens on, grabs released. Stopping the service releases all grabs.
+Repo: https://github.com/danielrosehill/KDE-Wayland-Power-Button-Screen-Toggle
+"""
+import os, select, signal, subprocess, sys, time
+import evdev
+from evdev import ecodes as E
+
+def log(*a): print(*a, flush=True)
+
+def dpms(mode):
+    subprocess.run(["kscreen-doctor", "--dpms", mode], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def is_power(d): return d.name == "Power Button"
+
+def is_input(d):
+    caps = d.capabilities()
+    keys = set(caps.get(E.EV_KEY, []))
+    return E.EV_REL in caps or E.EV_ABS in caps or E.KEY_A in keys or E.KEY_SPACE in keys or E.BTN_LEFT in keys
+
+power = []
+for p in evdev.list_devices():
+    d = evdev.InputDevice(p)
+    if is_power(d):
+        d.grab(); power.append(d)
+    else:
+        d.close()
+if not power: log("no Power Button device"); sys.exit(1)
+log("holding", [d.path for d in power])
+
+off = False
+grabbed = {}
+
+def grab_inputs():
+    for p in evdev.list_devices():
+        if p in grabbed: continue
+        try:
+            d = evdev.InputDevice(p)
+        except OSError: continue
+        if is_power(d) or not is_input(d): d.close(); continue
+        try: d.grab(); grabbed[p] = d
+        except OSError: d.close()   # e.g. already grabbed by input-remapper; its virtual device gets grabbed instead
+
+def release_inputs():
+    for d in grabbed.values():
+        try: d.ungrab()
+        except OSError: pass
+        d.close()
+    grabbed.clear()
+
+def screens_on(*_):
+    global off
+    dpms("on"); release_inputs(); off = False
+
+def stop(*_):
+    screens_on(); sys.exit(0)
+signal.signal(signal.SIGTERM, stop); signal.signal(signal.SIGINT, stop)
+
+last = 0.0
+while True:
+    r, _, _ = select.select(power, [], [], 2.0)
+    if off: grab_inputs()            # pick up devices plugged in while the screens are off
+    for d in r:
+        for ev in d.read():
+            if ev.type == E.EV_KEY and ev.code == E.KEY_POWER and ev.value == 0:   # on release
+                if time.monotonic() - last < 1.0: continue
+                last = time.monotonic()
+                if off:
+                    screens_on(); log("screens on")
+                else:
+                    grab_inputs(); time.sleep(0.3); dpms("off"); off = True
+                    log("screens off, grabbed", len(grabbed))
