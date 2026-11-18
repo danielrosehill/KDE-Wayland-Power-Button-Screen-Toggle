@@ -32,6 +32,21 @@ It works alongside [input-remapper](https://github.com/sezanzeb/input-remapper).
 
 The power button itself still works as a power button in one way: holding it for about 4 seconds forces a hard power-off. The motherboard does that, and no operating system can change it.
 
+## Remote control (Home Assistant, MQTT, scripts)
+
+The service also takes signals, with exactly the same behaviour as the button (input grabbed while off):
+
+```bash
+systemctl --user kill --kill-whom=main -s SIGUSR1 screen-toggle   # screens off
+systemctl --user kill --kill-whom=main -s SIGUSR2 screen-toggle   # screens on
+cat ~/.local/state/screen-toggle/state                            # "on" or "off" ($XDG_STATE_HOME respected)
+```
+
+A signal that matches the current state does nothing, so these are idempotent. Use them instead of
+`kscreen-doctor --dpms off` from another tool: a plain DPMS off is woken by any mouse movement, and it
+leaves this service's idea of the state wrong. An MQTT bridge can publish the state file to get button
+presses into Home Assistant (poll it every couple of seconds).
+
 ## Install
 
 ```bash

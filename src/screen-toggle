@@ -4,6 +4,9 @@
 Grabs the ACPI "Power Button" input devices exclusively (logind, PowerDevil, KWin never see the key).
 Press -> screens off (KWin DPMS via kscreen-doctor) and EVIOCGRAB every other keyboard/mouse so input
 can't wake them. Press again -> screens on, grabs released. Stopping the service releases all grabs.
+Remote control (e.g. a Home Assistant / MQTT agent): SIGUSR1 = screens off, SIGUSR2 = screens on, same
+behaviour as the button:  systemctl --user kill -s SIGUSR1 screen-toggle
+Current state ("on"/"off") is written to $XDG_STATE_HOME/screen-toggle/state (default ~/.local/state).
 Repo: https://github.com/danielrosehill/KDE-Wayland-Power-Button-Screen-Toggle
 """
 import os, select, signal, subprocess, sys, time
@@ -34,6 +37,14 @@ log("holding", [d.path for d in power])
 
 off = False
 grabbed = {}
+STATE = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "screen-toggle", "state")
+
+def write_state():
+    try:
+        os.makedirs(os.path.dirname(STATE), exist_ok=True)
+        with open(STATE + ".tmp", "w") as f: f.write("off\n" if off else "on\n")
+        os.replace(STATE + ".tmp", STATE)
+    except OSError as e: log("state file:", e)
 
 def grab_inputs():
     for p in evdev.list_devices():
@@ -54,17 +65,37 @@ def release_inputs():
 
 def screens_on(*_):
     global off
-    dpms("on"); release_inputs(); off = False
+    dpms("on"); release_inputs(); off = False; write_state()
+
+def screens_off():
+    global off
+    grab_inputs(); time.sleep(0.3); dpms("off"); off = True; write_state()
 
 def stop(*_):
     screens_on(); sys.exit(0)
 signal.signal(signal.SIGTERM, stop); signal.signal(signal.SIGINT, stop)
 
+# SIGUSR1/SIGUSR2 only queue a request; the main loop acts on it (a wakeup fd makes select() return at once).
+pending = []
+wake_r, wake_w = os.pipe(); os.set_blocking(wake_r, False); os.set_blocking(wake_w, False)
+signal.set_wakeup_fd(wake_w)
+signal.signal(signal.SIGUSR1, lambda *_: pending.append("off"))
+signal.signal(signal.SIGUSR2, lambda *_: pending.append("on"))
+write_state()
+
 last = 0.0
 while True:
-    r, _, _ = select.select(power, [], [], 2.0)
+    r, _, _ = select.select(power + [wake_r], [], [], 2.0)
+    if wake_r in r:
+        try: os.read(wake_r, 64)
+        except BlockingIOError: pass
+    while pending:
+        want = pending.pop(0)
+        if want == "off" and not off: screens_off(); log("screens off (signal), grabbed", len(grabbed))
+        elif want == "on" and off: screens_on(); log("screens on (signal)")
     if off: grab_inputs()            # pick up devices plugged in while the screens are off
     for d in r:
+        if d is wake_r: continue
         for ev in d.read():
             if ev.type == E.EV_KEY and ev.code == E.KEY_POWER and ev.value == 0:   # on release
                 if time.monotonic() - last < 1.0: continue
@@ -72,5 +103,5 @@ while True:
                 if off:
                     screens_on(); log("screens on")
                 else:
-                    grab_inputs(); time.sleep(0.3); dpms("off"); off = True
+                    screens_off()
                     log("screens off, grabbed", len(grabbed))
