@@ -87,10 +87,25 @@ def screens_on(*_):
     global off
     dpms("on"); release_inputs(); off = False; write_state()
 
+def session_in_front():
+    """True if a session of ours is the active one on seat0. With several users (Switch User), only the
+    session in front may blank the screens; otherwise we'd grab the other user's keyboard while our
+    kscreen-doctor talks to a compositor that isn't on screen."""
+    try:
+        sid = subprocess.run(["loginctl", "show-seat", "seat0", "-p", "ActiveSession", "--value"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        if not sid: return True
+        uid = subprocess.run(["loginctl", "show-session", sid, "-p", "User", "--value"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        return uid == str(os.getuid())
+    except (OSError, subprocess.SubprocessError): return True
+
 def screens_off():
     """Fail-safe: if the screens can't be turned off, release input again so the keyboard is never locked
     while the screens are on (what happened 2026-11-19 when kscreen-doctor ran before the session was up)."""
     global off
+    if not session_in_front():
+        log("screens off skipped: another user's session is in front"); return False
     grab_inputs(); time.sleep(0.3)
     if not dpms("off"):
         release_inputs(); log("screens off FAILED, input released"); return False

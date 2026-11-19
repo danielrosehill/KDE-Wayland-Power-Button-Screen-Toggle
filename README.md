@@ -27,7 +27,8 @@ It sounds trivial. On KDE Plasma under Wayland it isn't, and I'd been trying to 
 3. **When you press it again,** it calls `kscreen-doctor --dpms on` and releases all the input devices.
 4. It acts on key *release* with a 1-second debounce, so one press is one toggle.
 5. **If the screens can't be turned off** (`kscreen-doctor` fails), it releases the input again and stays "on", so you are never left with lit screens and a dead keyboard. `kscreen-doctor` is run with `WAYLAND_DISPLAY` and friends read from `systemctl --user show-environment` at call time: the unit can start before Plasma exports them, and without `WAYLAND_DISPLAY` `kscreen-doctor` aborts (Qt fatal in `QGuiApplication` init, SIGABRT core dump).
-6. **If the service stops or crashes,** the kernel releases its holds and the stop handler turns the screens back on, so you can't get locked out.
+6. **Several users (Switch User):** it only blanks the screens while its own user's session is the active one on `seat0` (`loginctl show-seat seat0 -p ActiveSession`). If someone else's session is in front, a press or signal is ignored, so it never grabs another user's keyboard.
+7. **If the service stops or crashes,** the kernel releases its holds and the stop handler turns the screens back on, so you can't get locked out.
 
 It works alongside [input-remapper](https://github.com/sezanzeb/input-remapper). Devices that input-remapper already holds can't be taken twice, but the script takes input-remapper's virtual output devices instead.
 
