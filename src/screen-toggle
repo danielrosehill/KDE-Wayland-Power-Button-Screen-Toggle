@@ -15,8 +15,28 @@ from evdev import ecodes as E
 
 def log(*a): print(*a, flush=True)
 
+def session_env():
+    # The unit can start before Plasma exports WAYLAND_DISPLAY to the systemd user manager; without it
+    # kscreen-doctor aborts. Read the manager's environment at call time instead of trusting our own.
+    env = dict(os.environ)
+    try:
+        out = subprocess.run(["systemctl", "--user", "show-environment"], capture_output=True, text=True, timeout=5).stdout
+        for line in out.splitlines():
+            k, _, v = line.partition("=")
+            if k in ("WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"): env[k] = v
+    except (OSError, subprocess.SubprocessError): pass
+    env.setdefault("WAYLAND_DISPLAY", "wayland-0")
+    return env
+
 def dpms(mode):
-    subprocess.run(["kscreen-doctor", "--dpms", mode], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    """True if kscreen-doctor succeeded."""
+    try:
+        r = subprocess.run(["kscreen-doctor", "--dpms", mode], env=session_env(),
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError) as e:
+        log("kscreen-doctor", mode, "failed:", e); return False
+    if r.returncode != 0: log("kscreen-doctor", mode, "exit", r.returncode, (r.stderr or "").strip()[-200:])
+    return r.returncode == 0
 
 def is_power(d): return d.name == "Power Button"
 
@@ -68,8 +88,13 @@ def screens_on(*_):
     dpms("on"); release_inputs(); off = False; write_state()
 
 def screens_off():
+    """Fail-safe: if the screens can't be turned off, release input again so the keyboard is never locked
+    while the screens are on (what happened 2026-11-19 when kscreen-doctor ran before the session was up)."""
     global off
-    grab_inputs(); time.sleep(0.3); dpms("off"); off = True; write_state()
+    grab_inputs(); time.sleep(0.3)
+    if not dpms("off"):
+        release_inputs(); log("screens off FAILED, input released"); return False
+    off = True; write_state(); return True
 
 def stop(*_):
     screens_on(); sys.exit(0)
@@ -91,7 +116,7 @@ while True:
         except BlockingIOError: pass
     while pending:
         want = pending.pop(0)
-        if want == "off" and not off: screens_off(); log("screens off (signal), grabbed", len(grabbed))
+        if want == "off" and not off and screens_off(): log("screens off (signal), grabbed", len(grabbed))
         elif want == "on" and off: screens_on(); log("screens on (signal)")
     if off: grab_inputs()            # pick up devices plugged in while the screens are off
     for d in r:
@@ -102,6 +127,5 @@ while True:
                 last = time.monotonic()
                 if off:
                     screens_on(); log("screens on")
-                else:
-                    screens_off()
+                elif screens_off():
                     log("screens off, grabbed", len(grabbed))
